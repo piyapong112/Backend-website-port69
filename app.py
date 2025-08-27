@@ -17,7 +17,7 @@ app.secret_key = 'a-very-secure-and-random-secret-key-for-production'
 # --- RECAPTCHA SECRET KEY ---
 # ‼️ ควรย้ายไปเก็บใน Environment Variable เช่นกัน
 # RECAPTCHA_SECRET_KEY = os.environ.get('RECAPTCHA_SECRET_KEY')
-RECAPTCHA_SECRET_KEY = '6Lf3cbQrAAAAAK4XKDcHDrGw9PjQmjOXS4avkGMo' # SECRET KEY ของ reCAPTCHA
+RECAPTCHA_SECRET_KEY = '6Lf3cbQrAAAAAABBYuHi6uIypovDpm3cFpmStjwoD' # SECRET KEY ของ reCAPTCHA
 
 # --- ตั้งค่า Flask-Login ---
 login_manager = LoginManager()
