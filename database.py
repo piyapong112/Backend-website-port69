@@ -8,12 +8,16 @@ def init_db():
     conn = sqlite3.connect('inventory.db')
     c = conn.cursor()
 
-    # 1. Create the 'users' table if it doesn't exist
+    # สร้างตาราง users ใหม่ให้มีทุกคอลัมน์
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT NOT NULL UNIQUE,
-            password TEXT NOT NULL
+            password TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            is_verified BOOLEAN DEFAULT FALSE,
+            otp TEXT,
+            otp_expiry TEXT
         )
     ''')
 
@@ -93,10 +97,26 @@ def init_db():
                 pass # Column already exists, no action needed.
             else:
                 raise # Re-raise other unexpected errors.
+        try:
+            c.execute('ALTER TABLE users ADD COLUMN email TEXT UNIQUE')
+        except sqlite3.OperationalError:
+            pass # คอลัมน์มีอยู่แล้ว
+        try:
+            c.execute('ALTER TABLE users ADD COLUMN is_verified BOOLEAN DEFAULT FALSE')
+        except sqlite3.OperationalError:
+            pass # คอลัมน์มีอยู่แล้ว
+        try:
+            c.execute('ALTER TABLE users ADD COLUMN otp TEXT')
+        except sqlite3.OperationalError:
+            pass # คอลัมน์มีอยู่แล้ว
+        try:
+            c.execute('ALTER TABLE users ADD COLUMN otp_expiry TEXT')
+        except sqlite3.OperationalError:
+            pass # คอลัมน์มีอยู่แล้ว
 
     conn.commit()
     conn.close()
 
 if __name__ == '__main__':
     init_db()
-    print("Database initialization or update complete!")
+    print("Database schema updated for 2FA and email verification!")

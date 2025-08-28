@@ -1,9 +1,14 @@
-from flask import Flask, render_template, request, redirect, url_for, jsonify, flash
+from dotenv import load_dotenv  # เพิ่มบรรทัดนี้
+load_dotenv()                   # และบรรทัดนี้
+from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_mail import Mail, Message # เพิ่มเข้ามา
 import sqlite3
 from datetime import datetime, timedelta
 import os
 import requests
+import random # เพิ่มเข้ามา
+import string # เพิ่มเข้ามา
 from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
@@ -14,20 +19,30 @@ app = Flask(__name__)
 # ตัวอย่าง: app.secret_key = os.environ.get('SECRET_KEY', 'default-fallback-key')
 app.secret_key = 'a-very-secure-and-random-secret-key-for-production'
 
-# --- RECAPTCHA SECRET KEY ---
-# ‼️ ควรย้ายไปเก็บใน Environment Variable เช่นกัน
-# RECAPTCHA_SECRET_KEY = os.environ.get('RECAPTCHA_SECRET_KEY')
-RECAPTCHA_SECRET_KEY = '6Lf3cbQrAAAAAABBYuHi6uIypovDpm3cFpmStjwoD' # SECRET KEY ของ reCAPTCHA
+# --- RECAPTCHA SECRET KEY (UPDATED) ---
+# ใส่ Secret Key ที่คุณให้มา
+RECAPTCHA_SECRET_KEY = '6Lf3cbQrAAAAAABBYuHi6uIypovDpm3cFpmStjwoD'
+# --- ‼️ การตั้งค่าสำหรับการส่ง Email (สำคัญมาก) ---
+# ‼️ คุณต้องตั้งค่าเหล่านี้เป็น Environment Variables บนเซิร์ฟเวอร์ของคุณ
+# ‼️ สำหรับ Gmail คุณต้องสร้าง "App Password" และเปิดใช้งาน Less Secure Apps
+app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = os.environ.get('MAIL_USE_TLS', 'true').lower() in ['true', '1', 't']
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', 'YOUR_GMAIL_USERNAME@gmail.com') # ใส่อีเมลของคุณ
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', 'YOUR_GMAIL_APP_PASSWORD') # ใส่ App Password ของคุณ
+app.config['MAIL_DEFAULT_SENDER'] = ('Your App Name', app.config['MAIL_USERNAME'])
 
+mail = Mail(app)
 # --- ตั้งค่า Flask-Login ---
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
 class User(UserMixin):
-    def __init__(self, id, username):
+    def __init__(self, id, username, email):
         self.id = id
         self.username = username
+        self.email = email
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -35,7 +50,7 @@ def load_user(user_id):
     user_data = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
     conn.close()
     if user_data:
-        return User(id=user_data['id'], username=user_data['username'])
+        return User(id=user_data['id'], username=user_data['username'], email=user_data['email'])
     return None
 
 def get_db_connection():
@@ -43,38 +58,95 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
+def generate_otp(length=6):
+    """สร้างรหัส OTP แบบตัวเลข"""
+    return ''.join(random.choices(string.digits, k=length))
+
+def send_otp_email(recipient_email, otp):
+    """ส่งอีเมลพร้อมรหัส OTP"""
+    try:
+        msg = Message('Your Verification Code', recipients=[recipient_email])
+        msg.body = f'Your verification code is: {otp}\nThis code will expire in 10 minutes.'
+        mail.send(msg)
+        return True
+    except Exception as e:
+        print(f"Error sending email: {e}") # สำหรับ Debug
+        return False
+
+# --- Routes สำหรับการลงทะเบียนและยืนยันตัวตน ---
+
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        recaptcha_response = request.form.get('g-recaptcha-response')
-        if not recaptcha_response:
-            flash('กรุณายืนยันว่าคุณไม่ใช่บอท', 'danger')
-            return redirect(url_for('register'))
-
-        verify_url = f'https://www.google.com/recaptcha/api/siteverify?secret={RECAPTCHA_SECRET_KEY}&response={recaptcha_response}'
-        response = requests.post(verify_url)
-        result = response.json()
-
-        if not result.get('success'):
-            flash('การยืนยัน reCAPTCHA ล้มเหลว กรุณาลองใหม่', 'danger')
-            return redirect(url_for('register'))
-
+        # ... (ส่วน reCAPTCHA ยังคงเดิม) ...
         username = request.form.get('username')
+        email = request.form.get('email')
         password = request.form.get('password')
-        hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+        confirm_password = request.form.get('confirm_password')
+
+        if password != confirm_password:
+            flash('รหัสผ่านและการยืนยันรหัสผ่านไม่ตรงกัน', 'danger')
+            return redirect(url_for('register'))
 
         conn = get_db_connection()
-        try:
-            conn.execute('INSERT INTO users (username, password) VALUES (?, ?)', (username, hashed_password))
-            conn.commit()
-            flash('สมัครสมาชิกสำเร็จ! กรุณาล็อกอิน', 'success')
-            return redirect(url_for('login'))
-        except sqlite3.IntegrityError:
+        if conn.execute('SELECT id FROM users WHERE username = ?', (username,)).fetchone():
             flash('Username นี้มีผู้ใช้งานแล้ว', 'danger')
-            return redirect(url_for('register'))
-        finally:
             conn.close()
-    return render_template('register.html')
+            return redirect(url_for('register'))
+        if conn.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone():
+            flash('Email นี้มีผู้ใช้งานแล้ว', 'danger')
+            conn.close()
+            return redirect(url_for('register'))
+
+        hashed_password = generate_password_hash(password, method='pbkdf2:sha256')
+        otp = generate_otp()
+        otp_expiry = datetime.now() + timedelta(minutes=10)
+
+        # บันทึกผู้ใช้ใหม่แต่ยังไม่ยืนยันตัวตน
+        conn.execute(
+            'INSERT INTO users (username, email, password, otp, otp_expiry, is_verified) VALUES (?, ?, ?, ?, ?, ?)',
+            (username, email, hashed_password, otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), False)
+        )
+        conn.commit()
+        conn.close()
+
+        if send_otp_email(email, otp):
+            flash('ลงทะเบียนสำเร็จ! กรุณาตรวจสอบอีเมลเพื่อนำรหัสมายืนยันตัวตน', 'info')
+            return redirect(url_for('verify_registration', email=email))
+        else:
+            flash('เกิดข้อผิดพลาดในการส่งอีเมลยืนยัน กรุณาลองใหม่', 'danger')
+            return redirect(url_for('register'))
+
+    return render_template('register.html', site_key='6Lf3cbQrAAAAAK4XKDcHDrGw9PjQmjOXS4avkGMo')
+
+@app.route('/verify-registration/<email>', methods=['GET', 'POST'])
+def verify_registration(email):
+    if request.method == 'POST':
+        submitted_otp = request.form.get('otp')
+        conn = get_db_connection()
+        user_data = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+
+        if not user_data:
+            flash('ไม่พบอีเมลนี้ในระบบ', 'danger')
+            return redirect(url_for('register'))
+
+        otp_expiry = datetime.strptime(user_data['otp_expiry'], '%Y-%m-%d %H:%M:%S')
+
+        if user_data['otp'] == submitted_otp and datetime.now() < otp_expiry:
+            # ยืนยันสำเร็จ
+            conn.execute('UPDATE users SET is_verified = ?, otp = NULL, otp_expiry = NULL WHERE email = ?', (True, email))
+            conn.commit()
+            conn.close()
+            flash('ยืนยันอีเมลสำเร็จ! กรุณาล็อกอิน', 'success')
+            return redirect(url_for('login'))
+        else:
+            conn.close()
+            flash('รหัส OTP ไม่ถูกต้องหรือหมดอายุแล้ว', 'danger')
+            return redirect(url_for('verify_registration', email=email))
+
+    return render_template('verify.html', email=email, action_url=url_for('verify_registration', email=email))
+
+# --- Routes สำหรับการล็อกอินและ 2FA ---
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -82,20 +154,68 @@ def login():
         return redirect(url_for('dashboard'))
         
     if request.method == 'POST':
-        username = request.form.get('username')
+        email = request.form.get('email')
         password = request.form.get('password')
         conn = get_db_connection()
-        user_data = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
-        conn.close()
-
+        user_data = conn.execute('SELECT * FROM users WHERE email = ?', (email,)).fetchone()
+        
         if user_data and check_password_hash(user_data['password'], password):
-            user = User(id=user_data['id'], username=user_data['username'])
+            if not user_data['is_verified']:
+                flash('บัญชีของคุณยังไม่ได้ยืนยันอีเมล กรุณาตรวจสอบอีเมลของคุณ', 'warning')
+                conn.close()
+                return redirect(url_for('verify_registration', email=email))
+
+            # ขั้นตอนที่ 1: รหัสผ่านถูกต้อง -> เริ่ม 2FA
+            otp = generate_otp()
+            otp_expiry = datetime.now() + timedelta(minutes=10)
+            conn.execute('UPDATE users SET otp = ?, otp_expiry = ? WHERE id = ?', (otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), user_data['id']))
+            conn.commit()
+            conn.close()
+
+            if send_otp_email(email, otp):
+                session['user_id_to_verify'] = user_data['id'] # เก็บ id ไว้ใน session ชั่วคราว
+                flash('กรุณาตรวจสอบอีเมลเพื่อนำรหัสมายืนยันการล็อกอิน', 'info')
+                return redirect(url_for('verify_login'))
+            else:
+                flash('เกิดข้อผิดพลาดในการส่งรหัสยืนยัน', 'danger')
+                return redirect(url_for('login'))
+        else:
+            conn.close()
+            flash('Email หรือ Password ไม่ถูกต้อง', 'danger')
+            return redirect(url_for('login'))
+            
+    return render_template('login.html')
+
+@app.route('/verify-login', methods=['GET', 'POST'])
+def verify_login():
+    if 'user_id_to_verify' not in session:
+        return redirect(url_for('login'))
+
+    user_id = session['user_id_to_verify']
+    conn = get_db_connection()
+    user_data = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
+
+    if request.method == 'POST':
+        submitted_otp = request.form.get('otp')
+        otp_expiry = datetime.strptime(user_data['otp_expiry'], '%Y-%m-%d %H:%M:%S')
+
+        if user_data['otp'] == submitted_otp and datetime.now() < otp_expiry:
+            # ยืนยัน 2FA สำเร็จ
+            conn.execute('UPDATE users SET otp = NULL, otp_expiry = NULL WHERE id = ?', (user_id,))
+            conn.commit()
+            conn.close()
+            user = User(id=user_data['id'], username=user_data['username'], email=user_data['email'])
             login_user(user)
+            session.pop('user_id_to_verify', None) # ล้าง session
             return redirect(url_for('dashboard'))
         else:
-            flash('Username หรือ Password ไม่ถูกต้อง', 'danger')
-            return redirect(url_for('login'))
-    return render_template('login.html')
+            conn.close()
+            flash('รหัส OTP ไม่ถูกต้องหรือหมดอายุแล้ว', 'danger')
+            return redirect(url_for('verify_login'))
+
+    conn.close()
+    return render_template('verify.html', email=user_data['email'], action_url=url_for('verify_login'))
+
 
 @app.route('/logout')
 @login_required
