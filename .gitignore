@@ -1,4 +1,5 @@
 # .gitignore
+inventory.db
 .env
 __pycache__/
 *.pyc
