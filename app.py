@@ -1,38 +1,34 @@
-from dotenv import load_dotenv  # เพิ่มบรรทัดนี้
-load_dotenv()                   # และบรรทัดนี้
 from flask import Flask, render_template, request, redirect, url_for, jsonify, flash, session
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from flask_mail import Mail, Message # เพิ่มเข้ามา
+from flask_mail import Mail, Message
 import sqlite3
 from datetime import datetime, timedelta
 import os
 import requests
-import random # เพิ่มเข้ามา
-import string # เพิ่มเข้ามา
+import random
+import string
 from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
+
+# โหลด Environment Variables จากไฟล์ .env สำหรับการพัฒนาบนเครื่อง
+load_dotenv()
 
 app = Flask(__name__)
 
-# --- SECURITY IMPROVEMENT ---
-# ‼️ คำเตือนด้านความปลอดภัย: Secret Key ไม่ควรถูกเก็บไว้ในโค้ดโดยตรง
-# ควรย้ายไปเก็บใน Environment Variable บนเซิร์ฟเวอร์ของคุณ
-# ตัวอย่าง: app.secret_key = os.environ.get('SECRET_KEY', 'default-fallback-key')
-app.secret_key = 'a-very-secure-and-random-secret-key-for-production'
+# --- การตั้งค่าทั่วไป ---
+app.secret_key = os.environ.get('SECRET_KEY', 'default-fallback-key')
+RECAPTCHA_SECRET_KEY = os.environ.get('RECAPTCHA_SECRET_KEY')
 
-# --- RECAPTCHA SECRET KEY (UPDATED) ---
-# ใส่ Secret Key ที่คุณให้มา
-RECAPTCHA_SECRET_KEY = '6Lf3cbQrAAAAAABBYuHi6uIypovDpm3cFpmStjwoD'
-# --- ‼️ การตั้งค่าสำหรับการส่ง Email (สำคัญมาก) ---
-# ‼️ คุณต้องตั้งค่าเหล่านี้เป็น Environment Variables บนเซิร์ฟเวอร์ของคุณ
-# ‼️ สำหรับ Gmail คุณต้องสร้าง "App Password" และเปิดใช้งาน Less Secure Apps
+# --- การตั้งค่าสำหรับการส่ง Email ---
 app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
 app.config['MAIL_PORT'] = int(os.environ.get('MAIL_PORT', 587))
 app.config['MAIL_USE_TLS'] = os.environ.get('MAIL_USE_TLS', 'true').lower() in ['true', '1', 't']
-app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME', 'YOUR_GMAIL_USERNAME@gmail.com') # ใส่อีเมลของคุณ
-app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD', 'YOUR_GMAIL_APP_PASSWORD') # ใส่ App Password ของคุณ
+app.config['MAIL_USERNAME'] = os.environ.get('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.environ.get('MAIL_PASSWORD')
 app.config['MAIL_DEFAULT_SENDER'] = ('Your App Name', app.config['MAIL_USERNAME'])
 
 mail = Mail(app)
+
 # --- ตั้งค่า Flask-Login ---
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -59,21 +55,21 @@ def get_db_connection():
     return conn
 
 def generate_otp(length=6):
-    """สร้างรหัส OTP แบบตัวเลข"""
     return ''.join(random.choices(string.digits, k=length))
 
 def send_otp_email(recipient_email, otp):
-    """ส่งอีเมลพร้อมรหัส OTP"""
+    """
+    ส่งอีเมลพร้อมรหัส OTP และคืนค่าสถานะพร้อมข้อความ Error (ถ้ามี)
+    """
     try:
         msg = Message('Your Verification Code', recipients=[recipient_email])
         msg.body = f'Your verification code is: {otp}\nThis code will expire in 10 minutes.'
         mail.send(msg)
-        return True
+        return True, None  # คืนค่าว่าสำเร็จ และไม่มี Error
     except Exception as e:
-        print(f"Error sending email: {e}") # สำหรับ Debug
-        return False
-
-# --- Routes สำหรับการลงทะเบียนและยืนยันตัวตน ---
+        # พิมพ์ Error ที่เกิดขึ้นจริงลงใน Log ของเซิร์ฟเวอร์
+        print(f"ERROR: [Flask-Mail] - {e}")
+        return False, str(e) # คืนค่าว่าล้มเหลว และส่งข้อความ Error กลับไป
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -102,22 +98,32 @@ def register():
         otp = generate_otp()
         otp_expiry = datetime.now() + timedelta(minutes=10)
 
-        # บันทึกผู้ใช้ใหม่แต่ยังไม่ยืนยันตัวตน
-        conn.execute(
-            'INSERT INTO users (username, email, password, otp, otp_expiry, is_verified) VALUES (?, ?, ?, ?, ?, ?)',
-            (username, email, hashed_password, otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), False)
-        )
-        conn.commit()
-        conn.close()
+        try:
+            conn.execute(
+                'INSERT INTO users (username, email, password, otp, otp_expiry, is_verified) VALUES (?, ?, ?, ?, ?, ?)',
+                (username, email, hashed_password, otp, otp_expiry.strftime('%Y-%m-%d %H:%M:%S'), False)
+            )
+            conn.commit()
+        except sqlite3.Error as e:
+            conn.close()
+            flash(f'เกิดข้อผิดพลาดกับฐานข้อมูล: {e}', 'danger')
+            return redirect(url_for('register'))
 
-        if send_otp_email(email, otp):
+        # --- ปรับปรุงการจัดการ Error ตรงนี้ ---
+        success, error_message = send_otp_email(email, otp)
+        if success:
+            conn.close()
             flash('ลงทะเบียนสำเร็จ! กรุณาตรวจสอบอีเมลเพื่อนำรหัสมายืนยันตัวตน', 'info')
             return redirect(url_for('verify_registration', email=email))
         else:
-            flash('เกิดข้อผิดพลาดในการส่งอีเมลยืนยัน กรุณาลองใหม่', 'danger')
+            # ถ้าส่งอีเมลไม่สำเร็จ ให้ลบ user ที่เพิ่งสร้างออกไป
+            conn.execute('DELETE FROM users WHERE email = ?', (email,))
+            conn.commit()
+            conn.close()
+            flash('เกิดข้อผิดพลาดในการส่งอีเมลยืนยัน กรุณาลองใหม่อีกครั้ง', 'danger')
             return redirect(url_for('register'))
 
-    return render_template('register.html', site_key='6Lf3cbQrAAAAAK4XKDcHDrGw9PjQmjOXS4avkGMo')
+    return render_template('register.html', site_key=os.environ.get('RECAPTCHA_SITE_KEY', '6Lf3cbQrAAAAAK4XKDcHDrGw9PjQmjOXS4avkGMo'))
 
 @app.route('/verify-registration/<email>', methods=['GET', 'POST'])
 def verify_registration(email):
