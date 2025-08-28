@@ -276,7 +276,15 @@ def dashboard():
                            top_profitable_products=top_profitable_products, 
                            low_stock_products=low_stock_products, 
                            total_outstanding=total_outstanding)
+@app.route('/forms/stock-in')
+@login_required
+def forms_stock_in():
+    return render_template('stock_in_forms.html')
 
+@app.route('/forms/stock-out')
+@login_required
+def forms_stock_out():
+    return render_template('stock_out_forms.html')
 @app.route('/api/performance_data')
 @login_required
 def performance_data():
