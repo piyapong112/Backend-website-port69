@@ -246,6 +246,10 @@ def dashboard():
     payments = conn.execute('SELECT * FROM payments WHERE deleted_at IS NULL AND user_id = ?', (user_id,)).fetchall()
     low_stock_products = conn.execute('SELECT * FROM products WHERE stock <= 10 AND deleted_at IS NULL AND user_id = ?', (user_id,)).fetchall()
 
+    total_stock_remaining_data = conn.execute('SELECT SUM(stock) as total FROM products WHERE deleted_at IS NULL AND user_id = ?', (user_id,)).fetchone()
+    total_stock_remaining = total_stock_remaining_data['total'] if total_stock_remaining_data and total_stock_remaining_data['total'] is not None else 0
+
+
     cost_map = {o['factory_sku']: o['cost_per_item'] for o in orders}
     total_revenue = sum(s['quantity'] * s['price_per_item'] for s in sales)
     total_items_sold = sum(s['quantity'] for s in sales)
@@ -275,7 +279,8 @@ def dashboard():
                            current_stock_value=current_stock_value, 
                            top_profitable_products=top_profitable_products, 
                            low_stock_products=low_stock_products, 
-                           total_outstanding=total_outstanding)
+                           total_outstanding=total_outstanding,
+                           total_stock_remaining=total_stock_remaining)
 @app.route('/forms/stock-in')
 @login_required
 def forms_stock_in():
